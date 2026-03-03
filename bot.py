@@ -21,6 +21,7 @@ OPENROUTER_SITE_URL = os.getenv("OPENROUTER_SITE_URL", "")
 OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "discord-channel-bot")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+PORT_RAW = os.getenv("PORT", "10000")
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
     "You are a helpful Discord assistant. Keep replies concise and friendly.",
@@ -44,6 +45,11 @@ try:
     TARGET_CHANNEL_ID = int(TARGET_CHANNEL_ID_RAW)
 except ValueError as exc:
     raise ValueError("TARGET_CHANNEL_ID must be a valid integer channel ID.") from exc
+
+try:
+    PORT = int(PORT_RAW)
+except ValueError as exc:
+    raise ValueError("PORT must be a valid integer.") from exc
 
 logging.basicConfig(
     level=logging.INFO,
@@ -374,9 +380,19 @@ async def on_message(message: Message) -> None:
 
 
 async def main() -> None:
+    app = aiohttp.web.Application()
+    app.router.add_get("/", lambda _: aiohttp.web.Response(text="ok"))
+    app.router.add_get("/health", lambda _: aiohttp.web.Response(text="ok"))
+    runner = aiohttp.web.AppRunner(app)
+    await runner.setup()
+    site = aiohttp.web.TCPSite(runner, host="0.0.0.0", port=PORT)
+    await site.start()
+    logger.info("Health server listening on 0.0.0.0:%s", PORT)
+
     try:
         await client.start(DISCORD_TOKEN)
     finally:
+        await runner.cleanup()
         await openrouter.close()
         if groq_client is not None:
             await groq_client.close()
