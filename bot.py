@@ -421,6 +421,7 @@ async def main() -> None:
     try:
         await client.start(DISCORD_TOKEN)
     finally:
+        logger.info("Going to sleep")
         await runner.cleanup()
         await openrouter.close()
         if groq_client is not None:
