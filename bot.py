@@ -6,6 +6,7 @@ import json
 from typing import Dict, List, Optional
 
 import aiohttp
+from aiohttp import web
 import discord
 from discord import Message
 from dotenv import load_dotenv
@@ -380,12 +381,12 @@ async def on_message(message: Message) -> None:
 
 
 async def main() -> None:
-    app = aiohttp.web.Application()
-    app.router.add_get("/", lambda _: aiohttp.web.Response(text="ok"))
-    app.router.add_get("/health", lambda _: aiohttp.web.Response(text="ok"))
-    runner = aiohttp.web.AppRunner(app)
+    app = web.Application()
+    app.router.add_get("/", lambda _: web.Response(text="ok"))
+    app.router.add_get("/health", lambda _: web.Response(text="ok"))
+    runner = web.AppRunner(app)
     await runner.setup()
-    site = aiohttp.web.TCPSite(runner, host="0.0.0.0", port=PORT)
+    site = web.TCPSite(runner, host="0.0.0.0", port=PORT)
     await site.start()
     logger.info("Health server listening on 0.0.0.0:%s", PORT)
 
