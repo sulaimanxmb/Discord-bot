@@ -34,6 +34,7 @@ OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "814869741021560913"))
 
 GENERIC_FAILURE_REPLY = "I couldn't generate a response right now. Please try again in a moment."
 TOKEN_EXHAUSTED_REPLY = "Tokens exhausted for today"
+SILENT_FAILURE = "__SILENT_FAILURE__"
 
 if not DISCORD_TOKEN:
     raise ValueError("DISCORD_TOKEN is not set.")
@@ -135,40 +136,47 @@ class OpenRouterClient:
             "temperature": 0.7,
         }
 
-        async with self.session.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers,
-            json=payload,
-        ) as response:
-            response_text = await response.text()
-            if response.status != 200:
-                if is_quota_or_limit_error(response.status, response_text):
-                    return TOKEN_EXHAUSTED_REPLY
+        try:
+            async with self.session.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+            ) as response:
+                response_text = await response.text()
+                if response.status != 200:
+                    if is_quota_or_limit_error(response.status, response_text):
+                        return TOKEN_EXHAUSTED_REPLY
 
-                logger.error(
-                    "OpenRouter error %s: %s",
-                    response.status,
-                    response_text,
-                )
-                return GENERIC_FAILURE_REPLY
+                    logger.error(
+                        "OpenRouter error %s: %s",
+                        response.status,
+                        response_text,
+                    )
+                    return GENERIC_FAILURE_REPLY
 
-            data = await response.json()
-            choices = data.get("choices", [])
-            if not choices:
-                return "I couldn't find a response from the model."
+                data = await response.json()
+                choices = data.get("choices", [])
+                if not choices:
+                    return "I couldn't find a response from the model."
 
-            raw_content = choices[0].get("message", {}).get("content", "")
-            if isinstance(raw_content, list):
-                parts = []
-                for chunk in raw_content:
-                    if isinstance(chunk, dict) and chunk.get("type") == "text":
-                        parts.append(chunk.get("text", ""))
-                content = "".join(parts).strip()
-            else:
-                content = str(raw_content).strip()
-            if not content:
-                return "I received an empty response from the model."
-            return content
+                raw_content = choices[0].get("message", {}).get("content", "")
+                if isinstance(raw_content, list):
+                    parts = []
+                    for chunk in raw_content:
+                        if isinstance(chunk, dict) and chunk.get("type") == "text":
+                            parts.append(chunk.get("text", ""))
+                    content = "".join(parts).strip()
+                else:
+                    content = str(raw_content).strip()
+                if not content:
+                    return "I received an empty response from the model."
+                return content
+        except asyncio.TimeoutError:
+            logger.error("OpenRouter request timed out.")
+            return SILENT_FAILURE
+        except aiohttp.ClientError as exc:
+            logger.error("OpenRouter request failed: %s", exc)
+            return GENERIC_FAILURE_REPLY
 
 
 class GroqClient:
@@ -199,33 +207,40 @@ class GroqClient:
             "temperature": 0.7,
         }
 
-        async with self.session.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers=headers,
-            json=payload,
-        ) as response:
-            response_text = await response.text()
-            if response.status != 200:
-                logger.error("Groq error %s: %s", response.status, response_text)
-                return GENERIC_FAILURE_REPLY
+        try:
+            async with self.session.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers=headers,
+                json=payload,
+            ) as response:
+                response_text = await response.text()
+                if response.status != 200:
+                    logger.error("Groq error %s: %s", response.status, response_text)
+                    return GENERIC_FAILURE_REPLY
 
-            data = await response.json()
-            choices = data.get("choices", [])
-            if not choices:
-                return "I couldn't find a response from the model."
+                data = await response.json()
+                choices = data.get("choices", [])
+                if not choices:
+                    return "I couldn't find a response from the model."
 
-            raw_content = choices[0].get("message", {}).get("content", "")
-            if isinstance(raw_content, list):
-                parts = []
-                for chunk in raw_content:
-                    if isinstance(chunk, dict) and chunk.get("type") == "text":
-                        parts.append(chunk.get("text", ""))
-                content = "".join(parts).strip()
-            else:
-                content = str(raw_content).strip()
-            if not content:
-                return "I received an empty response from the model."
-            return content
+                raw_content = choices[0].get("message", {}).get("content", "")
+                if isinstance(raw_content, list):
+                    parts = []
+                    for chunk in raw_content:
+                        if isinstance(chunk, dict) and chunk.get("type") == "text":
+                            parts.append(chunk.get("text", ""))
+                    content = "".join(parts).strip()
+                else:
+                    content = str(raw_content).strip()
+                if not content:
+                    return "I received an empty response from the model."
+                return content
+        except asyncio.TimeoutError:
+            logger.error("Groq request timed out.")
+            return SILENT_FAILURE
+        except aiohttp.ClientError as exc:
+            logger.error("Groq request failed: %s", exc)
+            return GENERIC_FAILURE_REPLY
 
 
 def build_prompt_messages(
@@ -243,6 +258,16 @@ def get_target_user_mention(message: Message) -> Optional[str]:
         if not mentioned_user.bot:
             return f"<@{mentioned_user.id}>"
     return None
+
+
+def is_owner_mentioned(message: Message) -> bool:
+    return any(mentioned_user.id == OWNER_USER_ID for mentioned_user in message.mentions)
+
+
+def is_bot_mentioned(message: Message) -> bool:
+    if client.user is None:
+        return False
+    return any(mentioned_user.id == client.user.id for mentioned_user in message.mentions)
 
 
 async def get_target_channel() -> Optional[discord.abc.Messageable]:
@@ -319,8 +344,11 @@ async def on_message(message: Message) -> None:
 
     if message.channel.id != TARGET_CHANNEL_ID:
         return
+    if not is_bot_mentioned(message):
+        return
 
     target_mention = get_target_user_mention(message)
+    owner_tagged = is_owner_mentioned(message)
     allowed_mentions = discord.AllowedMentions(
         everyone=False,
         roles=False,
@@ -346,17 +374,14 @@ async def on_message(message: Message) -> None:
     if last_ts is not None:
         remaining = USER_COOLDOWN_SECONDS - (now - last_ts)
         if remaining > 0:
-            await message.reply(
-                f"Please wait {remaining:.1f}s before sending another message.",
-                mention_author=True,
-                allowed_mentions=allowed_mentions,
-            )
             return
     user_last_message_ts[user_id] = now
 
     async with channel_lock:
         system_prompt = (
-            OWNER_SYSTEM_PROMPT if message.author.id == OWNER_USER_ID else SYSTEM_PROMPT
+            OWNER_SYSTEM_PROMPT
+            if message.author.id == OWNER_USER_ID or owner_tagged
+            else SYSTEM_PROMPT
         )
         model_user_text = (
             f"Address this user in your reply: {target_mention}\n\n{user_text}"
@@ -370,9 +395,12 @@ async def on_message(message: Message) -> None:
 
         async with message.channel.typing():
             reply = await openrouter.generate_reply(prompt_messages)
-            if reply == TOKEN_EXHAUSTED_REPLY and groq_client is not None:
-                logger.info("OpenRouter exhausted/limited, falling back to Groq.")
+            if reply in {TOKEN_EXHAUSTED_REPLY, SILENT_FAILURE} and groq_client is not None:
+                logger.info("OpenRouter unavailable/limited, falling back to Groq.")
                 reply = await groq_client.generate_reply(prompt_messages)
+            if reply == SILENT_FAILURE:
+                logger.info("Model request timed out; skipping channel reply.")
+                return
 
         if target_mention and not reply.startswith(target_mention):
             reply = f"{target_mention} {reply}"
